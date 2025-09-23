@@ -234,3 +234,6 @@ export default function IntentParser({ clubInfo, onComplete }: IntentParserProps
 
 
 
+
+
+
