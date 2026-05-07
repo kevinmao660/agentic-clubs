@@ -41,10 +41,13 @@ export function CurrentCampaignCard() {
     updateOrganization,
   } = useCampaign()
 
-  const cycle = campaigns.find((c) => c.id === campaignId) ?? campaigns[0] ?? null
+  const selectedCampaign =
+    campaigns.find((c) => c.id === campaignId) ?? campaigns[0] ?? null
 
   const stats = splitKeyStats(organization.keyStats).slice(0, 12)
-  const recordCount = cycle ? getRecordCountForCampaign(cycle.id) : 0
+  const recordCount = selectedCampaign
+    ? getRecordCountForCampaign(selectedCampaign.id)
+    : 0
   const isEditing = pathname === "/campaigns"
 
   return (
@@ -60,9 +63,11 @@ export function CurrentCampaignCard() {
           </Badge>
         </div>
         <CardDescription className="space-y-2">
-          <div className="font-medium text-foreground">{cycle?.name ?? "—"}</div>
+          <div className="font-medium text-foreground">
+            {selectedCampaign?.name ?? "—"}
+          </div>
           <div className="flex flex-wrap items-center gap-2 text-xs">
-            {cycle?.is_active ? (
+            {selectedCampaign?.is_active ? (
               <Badge variant="secondary" className="text-[10px]">
                 Active
               </Badge>
@@ -72,8 +77,8 @@ export function CurrentCampaignCard() {
               </Badge>
             )}
             <span className="text-muted-foreground">
-              {cycle
-                ? `Started ${new Date(cycle.created_at).toLocaleDateString()}`
+              {selectedCampaign
+                ? `Started ${new Date(selectedCampaign.created_at).toLocaleDateString()}`
                 : null}
             </span>
             <span className="text-muted-foreground">
@@ -83,20 +88,24 @@ export function CurrentCampaignCard() {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        {isEditing && cycle ? (
+        {isEditing && selectedCampaign ? (
           <div className="space-y-3">
             <div className="space-y-1">
               <div className="text-xs text-muted-foreground">Campaign name</div>
               <Input
-                value={cycle.name}
-                onChange={(e) => updateCampaign(cycle.id, { name: e.target.value })}
+                value={selectedCampaign.name}
+                onChange={(e) =>
+                  updateCampaign(selectedCampaign.id, { name: e.target.value })
+                }
               />
             </div>
             <div className="space-y-1">
               <div className="text-xs text-muted-foreground">Campaign ask</div>
               <Textarea
-                value={cycle.ask}
-                onChange={(e) => updateCampaign(cycle.id, { ask: e.target.value })}
+                value={selectedCampaign.ask}
+                onChange={(e) =>
+                  updateCampaign(selectedCampaign.id, { ask: e.target.value })
+                }
                 className="min-h-28 resize-none"
               />
               <div className="text-xs text-muted-foreground">
@@ -105,11 +114,11 @@ export function CurrentCampaignCard() {
               </div>
             </div>
           </div>
-        ) : cycle ? (
+        ) : selectedCampaign ? (
           <div className="space-y-1">
             <div className="text-xs text-muted-foreground">Campaign ask</div>
             <div className="rounded-lg border bg-muted/30 p-3 text-sm leading-6">
-              {clamp(cycle.ask, 280)}
+              {clamp(selectedCampaign.ask, 280)}
             </div>
           </div>
         ) : null}

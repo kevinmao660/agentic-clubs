@@ -2,7 +2,7 @@
 
 import * as React from "react"
 
-import { mockContacts, getOutreachHistoryForCompany } from "@/lib/mockData"
+import { buildOutreachHistoryForCompany } from "@/lib/outreach-memory"
 
 import { useCampaign } from "@/components/campaign-context"
 import { Badge } from "@/components/ui/badge"
@@ -31,12 +31,23 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { ArrowUpDownIcon } from "lucide-react"
+import { ArrowUpDownIcon, UserPlus } from "lucide-react"
+
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 
 type SortKey = "name" | "company" | "role" | "email"
 type SortDir = "asc" | "desc"
 
-function statusVariant(status: string) {
+function statusVariant(
+  status: string
+): "default" | "secondary" | "outline" | "destructive" {
   switch (status) {
     case "Agreed":
       return "default"
@@ -54,8 +65,38 @@ function statusVariant(status: string) {
   }
 }
 
-export default function ContactsPage() {
-  const { campaigns, campaignId, addContactsToCampaign } = useCampaign()
+type ContactsPageInnerProps = {
+  campaigns: ReturnType<typeof useCampaign>["campaigns"]
+  campaignId: string
+  contacts: ReturnType<typeof useCampaign>["contacts"]
+  outreachRecords: ReturnType<typeof useCampaign>["outreachRecords"]
+  addContactsToCampaign: ReturnType<
+    typeof useCampaign
+  >["addContactsToCampaign"]
+  moveContactsToCampaign: ReturnType<
+    typeof useCampaign
+  >["moveContactsToCampaign"]
+  createContact: ReturnType<typeof useCampaign>["createContact"]
+}
+
+function ContactsPageInner({
+  campaigns,
+  campaignId,
+  contacts,
+  outreachRecords,
+  addContactsToCampaign,
+  moveContactsToCampaign,
+  createContact,
+}: ContactsPageInnerProps) {
+  const [newContactOpen, setNewContactOpen] = React.useState(false)
+  const [newContact, setNewContact] = React.useState({
+    first_name: "",
+    last_name: "",
+    email: "",
+    company: "",
+    role: "",
+  })
+  const [savingContact, setSavingContact] = React.useState(false)
   const [query, setQuery] = React.useState("")
   const [selectedCompany, setSelectedCompany] = React.useState<string | null>(
     null
@@ -66,14 +107,24 @@ export default function ContactsPage() {
   const [targetCampaignId, setTargetCampaignId] =
     React.useState<string>(campaignId)
 
-  React.useEffect(() => {
-    setTargetCampaignId(campaignId)
-  }, [campaignId])
-
   const targetCampaignName = React.useMemo(
-    () => campaigns.find((c) => c.id === targetCampaignId)?.name ?? "Select campaign",
+    () =>
+      campaigns.find((c) => c.id === targetCampaignId)?.name ??
+      "Select campaign",
     [campaigns, targetCampaignId]
   )
+
+  const contactsCampaignSelectValue = React.useMemo(() => {
+    if (campaigns.some((c) => c.id === targetCampaignId)) return targetCampaignId
+    return campaigns[0]?.id ?? campaignId ?? ""
+  }, [campaigns, targetCampaignId, campaignId])
+
+  React.useEffect(() => {
+    if (campaigns.length === 0) return
+    if (campaigns.some((c) => c.id === targetCampaignId)) return
+    setTargetCampaignId(campaigns[0]?.id ?? campaignId)
+  }, [campaigns, targetCampaignId, campaignId])
+
   const [sort, setSort] = React.useState<{ key: SortKey; dir: SortDir }>({
     key: "name",
     dir: "asc",
@@ -88,12 +139,12 @@ export default function ContactsPage() {
 
   const filtered = React.useMemo(() => {
     const q = query.trim().toLowerCase()
-    if (!q) return mockContacts
-    return mockContacts.filter((c) => {
+    if (!q) return contacts
+    return contacts.filter((c) => {
       const hay = `${c.first_name} ${c.last_name} ${c.email} ${c.company} ${c.role}`.toLowerCase()
       return hay.includes(q)
     })
-  }, [query])
+  }, [contacts, query])
 
   const sorted = React.useMemo(() => {
     const dir = sort.dir === "asc" ? 1 : -1
@@ -145,22 +196,52 @@ export default function ContactsPage() {
   }
 
   function addSelectedToCampaign() {
-    addContactsToCampaign({
+    void addContactsToCampaign({
       campaignId: targetCampaignId,
       contactIds: Array.from(selectedContacts),
     })
     setSelectedContacts(new Set())
   }
 
+  function moveSelectedToCampaign() {
+    void moveContactsToCampaign({
+      campaignId: targetCampaignId,
+      contactIds: Array.from(selectedContacts),
+    })
+    setSelectedContacts(new Set())
+  }
+
+  async function handleCreateContact(e: React.FormEvent) {
+    e.preventDefault()
+    setSavingContact(true)
+    const c = await createContact(newContact)
+    setSavingContact(false)
+    if (c) {
+      setNewContactOpen(false)
+      setNewContact({
+        first_name: "",
+        last_name: "",
+        email: "",
+        company: "",
+        role: "",
+      })
+    }
+  }
+
   const memory = React.useMemo(() => {
     if (!selectedCompany) return []
-    return getOutreachHistoryForCompany(selectedCompany)
-  }, [selectedCompany])
+    return buildOutreachHistoryForCompany(
+      selectedCompany,
+      contacts,
+      outreachRecords,
+      campaigns
+    )
+  }, [selectedCompany, contacts, outreachRecords, campaigns])
 
   const selectedPrimaryContact = React.useMemo(() => {
     if (!selectedCompany) return null
-    return mockContacts.find((c) => c.company === selectedCompany) ?? null
-  }, [selectedCompany])
+    return contacts.find((c) => c.company === selectedCompany) ?? null
+  }, [contacts, selectedCompany])
 
   return (
     <div className="space-y-6">
@@ -171,28 +252,38 @@ export default function ContactsPage() {
         </p>
       </div>
 
-      <div className="flex items-center gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
+        <Button
+          type="button"
+          variant="outline"
+          className="shrink-0 gap-2"
+          onClick={() => setNewContactOpen(true)}
+        >
+          <UserPlus className="size-4" />
+          New contact
+        </Button>
         <Input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search contacts, companies, roles, emails…"
-          className="max-w-md"
+          className="max-w-md min-w-[12rem] flex-1"
         />
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Select
-            value={targetCampaignId}
+            value={contactsCampaignSelectValue}
             onValueChange={(v) =>
               setTargetCampaignId(
                 v && campaigns.some((c) => c.id === v) ? v : campaignId
               )
             }
+            disabled={campaigns.length === 0}
           >
             <SelectTrigger
-              aria-label="Campaign for add to campaign"
+              aria-label="Target campaign"
               className="min-w-56 max-w-[14rem] justify-between gap-2"
             >
               <span className="min-w-0 flex-1 truncate text-left font-medium">
-                {targetCampaignName}
+                {campaigns.length === 0 ? "No campaigns yet" : targetCampaignName}
               </span>
             </SelectTrigger>
             <SelectContent>
@@ -205,16 +296,111 @@ export default function ContactsPage() {
           </Select>
           <Button
             variant="secondary"
-            disabled={selectedContacts.size === 0}
+            disabled={
+              selectedContacts.size === 0 ||
+              campaigns.length === 0 ||
+              !targetCampaignId
+            }
             onClick={addSelectedToCampaign}
           >
             Add to campaign
           </Button>
+          <Button
+            variant="outline"
+            disabled={
+              selectedContacts.size === 0 ||
+              campaigns.length === 0 ||
+              !targetCampaignId
+            }
+            onClick={moveSelectedToCampaign}
+          >
+            Move to campaign
+          </Button>
         </div>
-        <div className="text-sm text-muted-foreground">
+        <div className="text-sm text-muted-foreground sm:ml-auto">
           {sorted.length} contacts
         </div>
       </div>
+
+      <Dialog open={newContactOpen} onOpenChange={setNewContactOpen}>
+        <DialogContent className="sm:max-w-md">
+          <form onSubmit={handleCreateContact}>
+            <DialogHeader>
+              <DialogTitle>New contact</DialogTitle>
+              <DialogDescription>
+                Add someone to the directory. Email must be unique.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="grid gap-3 py-4">
+              <div className="grid gap-1.5 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <div className="text-xs text-muted-foreground">First name</div>
+                  <Input
+                    required
+                    value={newContact.first_name}
+                    onChange={(e) =>
+                      setNewContact((p) => ({ ...p, first_name: e.target.value }))
+                    }
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <div className="text-xs text-muted-foreground">Last name</div>
+                  <Input
+                    required
+                    value={newContact.last_name}
+                    onChange={(e) =>
+                      setNewContact((p) => ({ ...p, last_name: e.target.value }))
+                    }
+                  />
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <div className="text-xs text-muted-foreground">Email</div>
+                <Input
+                  type="email"
+                  required
+                  className="font-mono text-sm"
+                  value={newContact.email}
+                  onChange={(e) =>
+                    setNewContact((p) => ({ ...p, email: e.target.value }))
+                  }
+                />
+              </div>
+              <div className="space-y-1.5">
+                <div className="text-xs text-muted-foreground">Company</div>
+                <Input
+                  required
+                  value={newContact.company}
+                  onChange={(e) =>
+                    setNewContact((p) => ({ ...p, company: e.target.value }))
+                  }
+                />
+              </div>
+              <div className="space-y-1.5">
+                <div className="text-xs text-muted-foreground">Role</div>
+                <Input
+                  value={newContact.role}
+                  onChange={(e) =>
+                    setNewContact((p) => ({ ...p, role: e.target.value }))
+                  }
+                />
+              </div>
+            </div>
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setNewContactOpen(false)}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" disabled={savingContact}>
+                {savingContact ? "Saving…" : "Create contact"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       <div className="rounded-lg border bg-card">
         <Table>
@@ -361,7 +547,7 @@ export default function ContactsPage() {
                       <div className="flex items-start justify-between gap-3">
                         <div className="space-y-0.5">
                           <div className="text-sm font-medium">
-                            {r.cycle.name}
+                            {r.campaign.name}
                           </div>
                           <div className="text-xs text-muted-foreground">
                             {r.last_contacted_date
@@ -373,7 +559,7 @@ export default function ContactsPage() {
                             {r.internal_author}
                           </div>
                         </div>
-                        <Badge variant={statusVariant(r.status) as any}>
+                        <Badge variant={statusVariant(r.status)}>
                           {r.status}
                         </Badge>
                       </div>
@@ -412,3 +598,26 @@ export default function ContactsPage() {
   )
 }
 
+export default function ContactsPage() {
+  const {
+    campaigns,
+    campaignId,
+    addContactsToCampaign,
+    moveContactsToCampaign,
+    createContact,
+    contacts,
+    outreachRecords,
+  } = useCampaign()
+  return (
+    <ContactsPageInner
+      key={campaignId}
+      campaigns={campaigns}
+      campaignId={campaignId}
+      contacts={contacts}
+      outreachRecords={outreachRecords}
+      addContactsToCampaign={addContactsToCampaign}
+      moveContactsToCampaign={moveContactsToCampaign}
+      createContact={createContact}
+    />
+  )
+}

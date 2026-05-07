@@ -2,10 +2,11 @@
 
 import * as React from "react"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
-
-import { mockContacts, mockCycles } from "@/lib/mockData"
+import { useSession } from "next-auth/react"
 
 import { useCampaign } from "@/components/campaign-context"
+import type { Campaign, Contact, OutreachRecord } from "@/lib/crm-types"
+import { buildOutreachHistoryForCompany } from "@/lib/outreach-memory"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
@@ -16,6 +17,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import {
   Select,
@@ -33,7 +35,13 @@ import {
 } from "@/components/ui/table"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
-import { ArrowUpDownIcon, Loader2Icon, SparklesIcon } from "lucide-react"
+import {
+  ArrowRightLeftIcon,
+  ArrowUpDownIcon,
+  Loader2Icon,
+  SendIcon,
+  SparklesIcon,
+} from "lucide-react"
 
 function statusBadgeClass(status: string) {
   switch (status) {
@@ -67,43 +75,76 @@ type GeneratedDraft = {
   body: string
 }
 
-function fillTemplate(
-  template: string,
-  vars: Record<string, string | undefined>
-) {
-  return template.replace(/\{\{(\w+)\}\}/g, (_, key: string) => vars[key] ?? "")
+function buildCompanyHistoryContext(
+  company: string,
+  contacts: Contact[],
+  outreachRecords: OutreachRecord[],
+  campaigns: Campaign[]
+): string | undefined {
+  const entries = buildOutreachHistoryForCompany(
+    company,
+    contacts,
+    outreachRecords,
+    campaigns
+  )
+  if (entries.length === 0) return undefined
+  return entries
+    .slice(0, 6)
+    .map((h) => {
+      const when = h.last_contacted_date
+        ? new Date(h.last_contacted_date).toLocaleDateString()
+        : "—"
+      return `- ${h.campaign.name} · ${h.status} · last: ${when}${
+        h.draft_subject ? ` · prior subject: ${h.draft_subject}` : ""
+      }`
+    })
+    .join("\n")
 }
-
-const SUBJECT_TEMPLATE =
-  "{{Org_Name}} — partnership with {{Company}}"
-
-const BODY_TEMPLATE =
-  "Hi {{First_Name}},\n\nI’m reaching out from {{Org_Name}}.\n\nWe run hands-on engineering workshops and student projects, and we’re lining up partners for our current campaign.\n\n{{Custom_Ask}}\n\nIf you’re open, I can share a short overview and a few options. Would a quick 15-minute chat next week work?\n\nBest,\n{{Sender_Name}}\n{{Org_Name}}"
 
 export function OutreachClient() {
   const router = useRouter()
   const pathname = usePathname()
   const searchParams = useSearchParams()
-  const { setCampaignId, outreachRecords, campaigns, organization } =
-    useCampaign()
+  const { data: session } = useSession()
+  const defaultAuthor = session?.user?.name?.trim() ?? ""
 
-  const defaultCycleId = React.useMemo(
-    () => mockCycles.find((c) => c.is_active)?.id ?? mockCycles[0]?.id ?? "",
-    []
+  const {
+    setCampaignId,
+    outreachRecords,
+    campaigns,
+    contacts,
+    moveOutreachRecordsToCampaign,
+    refreshData,
+  } = useCampaign()
+
+  const defaultCampaignViewId = React.useMemo(
+    () =>
+      campaigns.find((c) => c.is_active)?.id ?? campaigns[0]?.id ?? "",
+    [campaigns]
   )
 
-  const cycleFromUrl = searchParams.get("cycle")
-  const initialCycleId =
-    cycleFromUrl && mockCycles.some((c) => c.id === cycleFromUrl)
-      ? cycleFromUrl
-      : defaultCycleId
+  const searchKey = searchParams.toString()
+  const viewCampaignId = React.useMemo(() => {
+    const p = new URLSearchParams(searchKey)
+    const q = p.get("campaign") ?? p.get("cycle")
+    if (q && campaigns.some((c) => c.id === q)) return q
+    return defaultCampaignViewId
+  }, [searchKey, defaultCampaignViewId, campaigns])
 
-  const [cycleId, setCycleIdState] = React.useState(initialCycleId)
+  const campaignSelectValue = React.useMemo(() => {
+    if (campaigns.some((c) => c.id === viewCampaignId)) return viewCampaignId
+    return defaultCampaignViewId
+  }, [campaigns, viewCampaignId, defaultCampaignViewId])
+
   const [selected, setSelected] = React.useState<Set<string>>(() => new Set())
   const [draftOpen, setDraftOpen] = React.useState(false)
   const [prompt, setPrompt] = React.useState("")
+  const [internalAuthor, setInternalAuthor] = React.useState("")
+  const [generateError, setGenerateError] = React.useState<string | null>(null)
   const [isGenerating, setIsGenerating] = React.useState(false)
   const [generated, setGenerated] = React.useState<GeneratedDraft[] | null>(null)
+  const [isSending, setIsSending] = React.useState(false)
+  const [sendError, setSendError] = React.useState<string | null>(null)
   const [memoryOpen, setMemoryOpen] = React.useState(false)
   const [memoryCompany, setMemoryCompany] = React.useState<string | null>(null)
   const [memoryFocusRecordId, setMemoryFocusRecordId] = React.useState<
@@ -119,30 +160,56 @@ export function OutreachClient() {
     dir: "asc" | "desc"
   }>({ key: "last_contacted_date", dir: "desc" })
 
-  React.useEffect(() => {
-    const q = searchParams.get("cycle")
-    if (q && mockCycles.some((c) => c.id === q)) {
-      setCycleIdState((prev) => (prev === q ? prev : q))
-    }
-  }, [searchParams])
-
-  const selectedCycle = React.useMemo(
-    () => mockCycles.find((c) => c.id === cycleId) ?? null,
-    [cycleId]
+  const moveSelectOptions = React.useMemo(
+    () => campaigns.filter((c) => c.id !== viewCampaignId),
+    [campaigns, viewCampaignId]
   )
 
-  function setCycleFromUi(nextId: string) {
-    const next =
-      mockCycles.some((c) => c.id === nextId) ? nextId : defaultCycleId
-    setCycleIdState(next)
+  const derivedMoveTargetId = moveSelectOptions[0]?.id ?? ""
+
+  const [moveTargetOverride, setMoveTargetOverride] = React.useState<
+    string | null
+  >(null)
+
+  const moveTargetId = React.useMemo(() => {
+    if (
+      moveTargetOverride !== null &&
+      moveSelectOptions.some((c) => c.id === moveTargetOverride)
+    ) {
+      return moveTargetOverride
+    }
+    return derivedMoveTargetId
+  }, [moveTargetOverride, moveSelectOptions, derivedMoveTargetId])
+
+  React.useEffect(() => {
+    setMoveTargetOverride(null)
+  }, [viewCampaignId])
+
+  const selectedCampaignMeta = React.useMemo(
+    () => campaigns.find((c) => c.id === viewCampaignId) ?? null,
+    [campaigns, viewCampaignId]
+  )
+
+  function setViewCampaignInUrl(nextId: string) {
+    const next = campaigns.some((c) => c.id === nextId)
+      ? nextId
+      : defaultCampaignViewId
     const params = new URLSearchParams(searchParams.toString())
-    params.set("cycle", next)
+    params.delete("cycle")
+    params.set("campaign", next)
     router.replace(`${pathname}?${params.toString()}`, { scroll: false })
   }
 
   React.useEffect(() => {
-    setCampaignId(cycleId)
-  }, [cycleId, setCampaignId])
+    setCampaignId(viewCampaignId)
+  }, [viewCampaignId, setCampaignId])
+
+  function handleMoveSelectedToCampaign() {
+    if (selected.size === 0 || !moveTargetId) return
+    if (moveTargetId === viewCampaignId) return
+    void moveOutreachRecordsToCampaign(Array.from(selected), moveTargetId)
+    setSelected(new Set())
+  }
 
   function toggleSort(
     key:
@@ -159,51 +226,51 @@ export function OutreachClient() {
   }
 
   const rows = React.useMemo(() => {
-    const cycle = mockCycles.find((c) => c.id === cycleId) ?? null
+    const pipelineCampaign =
+      campaigns.find((c) => c.id === viewCampaignId) ?? null
     const items = outreachRecords
-      .filter((r) => r.cycle_id === cycleId)
+      .filter((r) => r.cycle_id === viewCampaignId)
       .map((r) => {
-        const contact = mockContacts.find((c) => c.id === r.contact_id)
+        const contact = contacts.find((c) => c.id === r.contact_id)
         if (!contact) return null
         return {
           record: r,
           contact,
-          cycle,
+          campaign: pipelineCampaign,
         }
       })
       .filter((x): x is NonNullable<typeof x> => x !== null)
 
     return items
-  }, [cycleId, outreachRecords])
+  }, [viewCampaignId, outreachRecords, campaigns, contacts])
 
   const companyHistory = React.useMemo(() => {
     if (!memoryCompany) return []
     const contactIds = new Set(
-      mockContacts
+      contacts
         .filter((c) => c.company === memoryCompany)
         .map((c) => c.id)
     )
     return outreachRecords
       .filter((r) => contactIds.has(r.contact_id))
       .map((r) => {
-        const contact = mockContacts.find((c) => c.id === r.contact_id)!
-        const cycleMeta =
-          campaigns.find((c) => c.id === r.cycle_id) ??
-          mockCycles.find((c) => c.id === r.cycle_id) ??
-          campaigns[0]!
-        return { record: r, contact, cycleMeta }
+        const contact = contacts.find((c) => c.id === r.contact_id)
+        const campaignMeta = campaigns.find((c) => c.id === r.cycle_id)
+        if (!contact || !campaignMeta) return null
+        return { record: r, contact, campaignMeta }
       })
+      .filter((x): x is NonNullable<typeof x> => x !== null)
       .sort((a, b) => {
-        const ad = a.record.last_contacted_date ?? a.cycleMeta.created_at
-        const bd = b.record.last_contacted_date ?? b.cycleMeta.created_at
+        const ad = a.record.last_contacted_date ?? a.campaignMeta.created_at
+        const bd = b.record.last_contacted_date ?? b.campaignMeta.created_at
         return bd.localeCompare(ad)
       })
-  }, [memoryCompany, outreachRecords, campaigns])
+  }, [memoryCompany, outreachRecords, campaigns, contacts])
 
   const peopleAtMemoryCompany = React.useMemo(() => {
     if (!memoryCompany) return []
-    return mockContacts.filter((c) => c.company === memoryCompany)
-  }, [memoryCompany])
+    return contacts.filter((c) => c.company === memoryCompany)
+  }, [memoryCompany, contacts])
 
   const sortedRows = React.useMemo(() => {
     const dir = sort.dir === "asc" ? 1 : -1
@@ -240,14 +307,22 @@ export function OutreachClient() {
   }, [rows, sort.dir, sort.key])
 
   React.useEffect(() => {
-    setSelected(new Set())
-  }, [cycleId])
+    const id = window.requestAnimationFrame(() => setSelected(new Set()))
+    return () => window.cancelAnimationFrame(id)
+  }, [viewCampaignId])
 
   const allSelected = rows.length > 0 && selected.size === rows.length
   const selectedRows = React.useMemo(
     () => sortedRows.filter((r) => selected.has(r.record.id)),
     [sortedRows, selected]
   )
+
+  const canSendSelected = React.useMemo(() => {
+    if (selected.size === 0) return false
+    return selectedRows.every(
+      (r) => (r.record.draft_body?.trim().length ?? 0) > 0
+    )
+  }, [selected, selectedRows])
 
   function toggleRow(id: string, next: boolean) {
     setSelected((prev) => {
@@ -268,6 +343,8 @@ export function OutreachClient() {
 
   function openDraftModal() {
     if (selected.size === 0) return
+    setInternalAuthor(defaultAuthor)
+    setGenerateError(null)
     setDraftOpen(true)
   }
 
@@ -277,6 +354,8 @@ export function OutreachClient() {
       setIsGenerating(false)
       setGenerated(null)
       setPrompt("")
+      setInternalAuthor("")
+      setGenerateError(null)
     }
   }
 
@@ -284,48 +363,127 @@ export function OutreachClient() {
     const source = target ?? selectedRows
     if (source.length === 0 || isGenerating) return
 
+    // Fall back to the signed-in name so a microtask right after open still has an author
+    // before React applies setInternalAuthor (e.g. “Draft with AI” from the memory panel).
+    const author = (internalAuthor.trim() || defaultAuthor.trim())
+    if (!author) {
+      setGenerateError("Enter your name (saved on each draft as the author).")
+      return
+    }
+
+    setGenerateError(null)
     setIsGenerating(true)
     setGenerated(null)
 
-    await new Promise((r) => setTimeout(r, 2000))
+    try {
+      const items = source.map(({ record, contact }) => ({
+        outreachRecordId: record.id,
+        contact: {
+          id: contact.id,
+          first_name: contact.first_name,
+          last_name: contact.last_name,
+          email: contact.email,
+          company: contact.company,
+          role: contact.role,
+        },
+        historicalContext: buildCompanyHistoryContext(
+          contact.company,
+          contacts,
+          outreachRecords,
+          campaigns
+        ),
+      }))
 
-    const sender = "Ava"
-    const customAsk =
-      prompt.trim().length > 0
-        ? prompt.trim()
-        : "If helpful, we can start with a modest tier ($500–$1,500) and tailor benefits around your goals (student visibility, recruiting touchpoints, or a guest speaker slot)."
+      const res = await fetch("/api/generate-draft", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          instruction: prompt,
+          internalAuthor: author,
+          items,
+        }),
+      })
 
-    const drafts: GeneratedDraft[] = source.map(({ record, contact }) => {
-      const vars = {
-        First_Name: contact.first_name,
-        Company: contact.company,
-        Sender_Name: sender,
-        Custom_Ask: customAsk,
-        Org_Name: organization.name,
+      const data = (await res.json()) as {
+        drafts?: GeneratedDraft[]
+        error?: string
       }
-      return {
-        recordId: record.id,
-        toName: `${contact.first_name} ${contact.last_name}`,
-        toEmail: contact.email,
-        company: contact.company,
-        subject: fillTemplate(SUBJECT_TEMPLATE, vars),
-        body: fillTemplate(BODY_TEMPLATE, vars),
-      }
-    })
 
-    setGenerated(drafts)
-    setIsGenerating(false)
+      if (!res.ok) {
+        setGenerateError(data.error ?? "Request failed.")
+        return
+      }
+      if (!data.drafts?.length) {
+        setGenerateError("No drafts were returned.")
+        return
+      }
+
+      setGenerated(data.drafts)
+      await refreshData()
+    } catch (e) {
+      setGenerateError(
+        e instanceof Error ? e.message : "Something went wrong."
+      )
+    } finally {
+      setIsGenerating(false)
+    }
   }
 
   function openDraftForSingleRow(recordId: string) {
     const row = sortedRows.find((r) => r.record.id === recordId)
     if (!row) return
     setSelected(new Set([recordId]))
+    setInternalAuthor(defaultAuthor)
+    setGenerateError(null)
     setDraftOpen(true)
     setPrompt("")
     queueMicrotask(() => {
       void handleGenerate([row])
     })
+  }
+
+  async function handleSendSelected() {
+    if (!canSendSelected || isSending) return
+    setSendError(null)
+    setIsSending(true)
+    try {
+      const res = await fetch("/api/send-emails", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ recordIds: Array.from(selected) }),
+      })
+      const data = (await res.json()) as {
+        sent?: number
+        failed?: number
+        results?: { recordId: string; ok: boolean; error?: string }[]
+        error?: string
+      }
+
+      if (!res.ok) {
+        setSendError(data.error ?? "Could not send emails.")
+        return
+      }
+
+      const failed = data.results?.filter((r) => !r.ok) ?? []
+
+      await refreshData()
+
+      if (failed.length === 0) {
+        setSelected(new Set())
+      } else {
+        const first = failed[0]?.error ?? "Unknown error"
+        setSendError(
+          failed.length === 1
+            ? first
+            : `${failed.length} failed (first: ${first})`
+        )
+        setSelected(new Set(failed.map((f) => f.recordId)))
+      }
+    } catch (e) {
+      setSendError(e instanceof Error ? e.message : "Send failed.")
+    } finally {
+      setIsSending(false)
+    }
   }
 
   function openCompanyMemory(company: string, focusRecordId: string) {
@@ -362,7 +520,7 @@ export function OutreachClient() {
           </p>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <Button
             onClick={openDraftModal}
             disabled={selected.size === 0}
@@ -371,28 +529,42 @@ export function OutreachClient() {
             <SparklesIcon className="size-4" />
             Draft with AI
           </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            className="gap-2"
+            disabled={!canSendSelected || isSending}
+            onClick={() => void handleSendSelected()}
+          >
+            {isSending ? (
+              <Loader2Icon className="size-4 animate-spin" />
+            ) : (
+              <SendIcon className="size-4" />
+            )}
+            Send selected
+          </Button>
           <div className="text-sm text-muted-foreground whitespace-nowrap">
-            Cycle
+            Campaign
           </div>
           <Select
-            value={cycleId}
-            onValueChange={(v) => setCycleFromUi(v ?? defaultCycleId)}
+            value={campaignSelectValue}
+            onValueChange={(v) => setViewCampaignInUrl(v ?? defaultCampaignViewId)}
           >
             <SelectTrigger
-              aria-label="Select cycle"
+              aria-label="Select campaign"
               className="min-w-64 max-w-[18rem] justify-between gap-2"
             >
               <span className="min-w-0 flex-1 truncate text-left font-medium">
-                {selectedCycle?.name ?? "Select cycle"}
+                {selectedCampaignMeta?.name ?? "Select campaign"}
               </span>
-              {selectedCycle?.is_active ? (
+              {selectedCampaignMeta?.is_active ? (
                 <Badge variant="secondary" className="shrink-0 text-[10px]">
                   Active
                 </Badge>
               ) : null}
             </SelectTrigger>
             <SelectContent align="end">
-              {mockCycles.map((c) => (
+              {campaigns.map((c) => (
                 <SelectItem key={c.id} value={c.id}>
                   <span className="flex min-w-0 flex-1 flex-col gap-0.5 text-left">
                     <span className="truncate font-medium">{c.name}</span>
@@ -409,11 +581,60 @@ export function OutreachClient() {
         </div>
       </div>
 
-      <div className="flex items-center justify-between">
+      {sendError ? (
+        <p className="text-sm text-destructive" role="alert">
+          {sendError}
+        </p>
+      ) : null}
+
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="text-sm text-muted-foreground">
           Showing <span className="text-foreground">{rows.length}</span> record
-          {rows.length === 1 ? "" : "s"} · Selected{" "}
+          {rows.length === 1 ? "" : "s"} in this campaign · Selected{" "}
           <span className="text-foreground">{selected.size}</span>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm text-muted-foreground">Move selected to</span>
+          <Select
+            value={moveTargetId}
+            onValueChange={(v) => setMoveTargetOverride(v)}
+            disabled={campaigns.length < 2}
+          >
+            <SelectTrigger
+              aria-label="Destination campaign"
+              className="min-w-52 max-w-[16rem]"
+            >
+              <span className="truncate">
+                {campaigns.find((c) => c.id === moveTargetId)?.name ??
+                  "Campaign"}
+              </span>
+            </SelectTrigger>
+            <SelectContent>
+              {campaigns
+                .filter((c) => c.id !== viewCampaignId)
+                .map((c) => (
+                  <SelectItem key={c.id} value={c.id}>
+                    {c.name}
+                  </SelectItem>
+                ))}
+            </SelectContent>
+          </Select>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="gap-1.5"
+            disabled={
+              selected.size === 0 ||
+              campaigns.length < 2 ||
+              !moveTargetId ||
+              moveTargetId === viewCampaignId
+            }
+            onClick={handleMoveSelectedToCampaign}
+          >
+            <ArrowRightLeftIcon className="size-3.5" />
+            Move to campaign
+          </Button>
         </div>
       </div>
 
@@ -530,7 +751,7 @@ export function OutreachClient() {
             {sortedRows.length === 0 && (
               <TableRow>
                 <TableCell colSpan={6} className="h-24 text-center">
-                  No outreach records in this cycle yet.
+                  No outreach records in this campaign yet.
                 </TableCell>
               </TableRow>
             )}
@@ -595,7 +816,7 @@ export function OutreachClient() {
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {companyHistory.map(({ record: r, contact: p, cycleMeta }) => (
+                  {companyHistory.map(({ record: r, contact: p, campaignMeta }) => (
                     <div
                       key={`${r.id}-${p.id}`}
                       className={`rounded-xl border bg-card p-3 shadow-sm ${
@@ -607,7 +828,7 @@ export function OutreachClient() {
                       <div className="flex items-start justify-between gap-2">
                         <div className="space-y-0.5">
                           <div className="text-sm font-medium">
-                            {cycleMeta.name}
+                            {campaignMeta.name}
                           </div>
                           <div className="text-xs text-muted-foreground">
                             {p.first_name} {p.last_name} ·{" "}
@@ -693,13 +914,34 @@ export function OutreachClient() {
             </DialogHeader>
 
             <div className="mt-4 grid gap-3">
+              <div className="grid gap-1.5">
+                <label
+                  htmlFor="draft-internal-author"
+                  className="text-sm font-medium text-foreground"
+                >
+                  Your name
+                </label>
+                <Input
+                  id="draft-internal-author"
+                  value={internalAuthor}
+                  onChange={(e) => setInternalAuthor(e.target.value)}
+                  placeholder="Shown on drafts (internal author)"
+                  disabled={isGenerating}
+                  autoComplete="name"
+                  autoFocus
+                />
+                <p className="text-xs text-muted-foreground">
+                  Stored on each outreach record as the teammate who requested the
+                  draft.
+                </p>
+              </div>
+
               <Textarea
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
                 placeholder='Example: "Ask for a $1,000 sponsorship and offer a guest speaker slot in October."'
                 className="min-h-28 resize-none"
                 disabled={isGenerating}
-                autoFocus
               />
 
               <div className="flex items-center justify-between text-xs text-muted-foreground">
@@ -709,6 +951,12 @@ export function OutreachClient() {
                 </div>
                 <div>{prompt.length} chars</div>
               </div>
+
+              {generateError ? (
+                <p className="text-sm text-destructive" role="alert">
+                  {generateError}
+                </p>
+              ) : null}
             </div>
           </div>
 
